@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+:root {
+    color-scheme: light dark;
+}
+
+body {
+    margin: 0;
+    padding: 8px;
+    font-family: Arial, sans-serif;
+    background: transparent;
+    color: var(--text-color, #222);
+}
+
+.bar {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+button {
+    flex: 1;
+    border: 0;
+    border-radius: 10px;
+    padding: 13px 8px;
+    font-size: 15px;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+#start {
+    background: #087b43;
+    color: #ffffff;
+}
+
+#stop {
+    background: #b42318;
+    color: #ffffff;
+}
+
+button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+#status {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 8px 0 12px;
+}
+
+#transcript {
+    background: #f1f5f9;
+    color: #172033;
+    border: 2px solid #cbd5e1;
+    border-radius: 12px;
+    padding: 16px;
+    min-height: 110px;
+    max-height: 260px;
+    overflow-y: auto;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    font-size: 17px;
+    line-height: 1.7;
+}
+
+.line {
+    margin-bottom: 16px;
+}
+
+.speaker {
+    display: block;
+    font-size: 15px;
+    font-weight: 800;
+    margin-bottom: 4px;
+    color: #087b43;
+}
+
+#transcript .line:last-child {
+    margin-bottom: 0;
+}
+</style>
+</head>
+<body>
+
+<div class="bar">
+    <button id="start">🎤 Start Live Voice</button>
+    <button id="stop" disabled>⏹ Stop Voice</button>
+</div>
+
+<div id="status">Voice band hai.</div>
+
+<div id="transcript">
+    <div class="line">
+        <span class="speaker">AI Assistant</span>
+        Live voice ka text yahan show hoga.
+    </div>
+</div>
+
+<audio id="remoteAudio" autoplay playsinline></audio>
+
+<script>
+const TOKEN = "__EPHEMERAL_TOKEN__";
+
+const statusBox = document.getElementById("status");
+const startButton = document.getElementById("start");
+const stopButton = document.getElementById("stop");
+const remoteAudio = document.getElementById("remoteAudio");
+const transcriptBox = document.getElementById("transcript");
+
+let peer = null;
+let microphone = null;
+let eventsChannel = null;
+let currentAIText = null;
+
+function setStatus(message) {
+    statusBox.textContent = message;
+}
+
+function addLine(speaker, text) {
+    if (!text || !text.trim()) return;
+
+    const line = document.createElement("div");
+    line.className = "line";
+
+    const label = document.createElement("span");
+    label.className = "speaker";
+    label.textContent = speaker;
+
+    const content = document.createElement("div");
+    content.textContent = text;
+
+    line.appendChild(label);
+    line.appendChild(content);
+    transcriptBox.appendChild(line);
+    transcriptBox.scrollTop = transcriptBox.scrollHeight;
+}
+
+function handleEvent(event) {
+    let data;
+
+    try {
+        data = JSON.parse(event.data);
+    } catch (_) {
+        return;
+    }
+
+    if (data.type === "error") {
+        setStatus(
+            "Voice error: " +
+            (data.error?.message || "Unknown error")
+        );
+        return;
+    }
+
+    if (
+        data.type ===
+        "conversation.item.input_audio_transcription.completed"
+    ) {
+        addLine("🧑 You", data.transcript || "");
+    }
+
+    if (data.type === "response.created") {
+        currentAIText = document.createElement("div");
+        currentAIText.className = "line";
+
+        const label = document.createElement("span");
+        label.className = "speaker";
+        label.textContent = "🌾 AI Assistant";
+
+        const content = document.createElement("div");
+
+        currentAIText.appendChild(label);
+        currentAIText.appendChild(content);
+
+        transcriptBox.appendChild(currentAIText);
+        transcriptBox.scrollTop = transcriptBox.scrollHeight;
+        setStatus("AI jawab de raha hai...");
+    }
+
+    if (data.type === "response.output_audio_transcript.delta") {
+        if (!currentAIText) {
+            currentAIText = document.createElement("div");
+            currentAIText.className = "line";
+
+            const label = document.createElement("span");
+            label.className = "speaker";
+            label.textContent = "🌾 AI Assistant";
+
+            currentAIText.appendChild(label);
+            currentAIText.appendChild(document.createElement("div"));
+            transcriptBox.appendChild(currentAIText);
+        }
+
+        currentAIText.lastChild.textContent += data.delta || "";
+        transcriptBox.scrollTop = transcriptBox.scrollHeight;
+    }
+
+    if (data.type === "response.output_audio_transcript.done") {
+        currentAIText = null;
+    }
+
+    if (data.type === "response.done") {
+        currentAIText = null;
+        setStatus("Live voice connected — aap baat kar sakte hain!");
+    }
+
+    if (data.type === "input_audio_buffer.speech_started") {
+        setStatus("Aap bol rahe hain...");
+    }
+}
+
+async function stopVoice() {
+    if (eventsChannel) {
+        try { eventsChannel.close(); } catch (_) {}
+        eventsChannel = null;
+    }
+
+    if (peer) {
+        try { peer.close(); } catch (_) {}
+        peer = null;
+    }
+
+    if (microphone) {
+        microphone.getTracks().forEach(track => track.stop());
+        microphone = null;
+    }
+
+    remoteAudio.pause();
+    remoteAudio.srcObject = null;
+
+    startButton.disabled = false;
+    stopButton.disabled = true;
+    setStatus("Voice band hai.");
+}
+
+startButton.addEventListener("click", async () => {
+    if (peer) return;
+
+    startButton.disabled = true;
+    stopButton.disabled = false;
+    setStatus("Microphone permission ka intezar hai...");
+
+    try {
+        microphone = await navigator.mediaDevices.getUserMedia({
+            audio: true
+        });
+
+        peer = new RTCPeerConnection();
+
+        peer.ontrack = event => {
+            remoteAudio.srcObject = event.streams[0];
+            remoteAudio.play().catch(() => {
+                setStatus("Audio play karne ki permission dein.");
+            });
+        };
+
+        peer.onconnectionstatechange = () => {
+            if (!peer) return;
+
+            if (peer.connectionState === "connected") {
+                setStatus("Live voice connected — ab baat karein!");
+            } else if (peer.connectionState === "failed") {
+                setStatus("Connection fail hui. Dobara try karein.");
+            }
+        };
+
+        microphone.getTracks().forEach(track => {
+            peer.addTrack(track, microphone);
+        });
+
+        eventsChannel = peer.createDataChannel("oai-events");
+        eventsChannel.onmessage = handleEvent;
+
+        eventsChannel.onopen = () => {
+            setStatus("Connected! Aap bol sakte hain.");
+        };
+
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
+
+        const response = await fetch(
+            "https://api.openai.com/v1/realtime/calls",
+            {
+                method: "POST",
+                headers: {
+                    "Authorization": "Bearer " + TOKEN,
+                    "Content-Type": "application/sdp"
+                },
+                body: offer.sdp
+            }
+        );
+
+        if (!response.ok) {
+            const details = await response.text();
+            throw new Error(
+                "Realtime API " + response.status + ": " +
+                details.slice(0, 250)
+            );
+        }
+
+        const answerSdp = await response.text();
+
+        await peer.setRemoteDescription({
+            type: "answer",
+            sdp: answerSdp
+        });
+
+        setStatus("Voice connect ho rahi hai...");
+
+    } catch (error) {
+        await stopVoice();
+        setStatus("Voice start nahi hui: " + error.message);
+    }
+});
+
+stopButton.addEventListener("click", stopVoice);
+</script>
+</body>
+</html>
